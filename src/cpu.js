@@ -342,6 +342,61 @@ CPU.prototype.create_jit_imports = function()
     }
 
     this.jit_imports = jit_imports;
+    const kObjectKeys = Object.keys(this.jit_imports);
+    function WorkerSrcCode() {
+        self.onmessage = e => {
+            const q = /** @type {{
+                port: MessagePort,
+                objectKeys: !Array<string>
+            }} */ (e.data);
+            const wasmMemory = new WebAssembly.Memory({ initial: 64 }); // requirement
+            new Uint8Array(wasmMemory.buffer)[1152] = 1;
+            const craftedWasmImp = Object.create(null);
+            for (let key of q.objectKeys) {
+                craftedWasmImp[key] = () => { };
+            };
+            craftedWasmImp['m'] = wasmMemory;
+            q.port.onmessage = e => {
+                const buf = /** @type {{
+                    id: number,
+                    buffer: ArrayBuffer
+                }} */ (e.data);
+                WebAssembly.instantiate(new Uint8Array(buf.buffer), { e: craftedWasmImp })
+                    .then(v => {
+                        for (let i = 0; i < 1; i++) {
+                            v.instance.exports.f();
+                        }
+
+                        q.port.postMessage({
+                            id: buf.id,
+                            mod: v.module
+                        });
+                    })
+            }
+        }
+    }
+    function putInBlob(func, ...args) {
+        const blob = new Blob([`(${func.toString()}).apply(null, ${JSON.stringify([...args])})`]);
+        const ur = URL.createObjectURL(blob);
+        return ur;
+    }
+    this.worker = new Worker(putInBlob(WorkerSrcCode));
+    this.requestId = 0;
+    const mP = new MessageChannel();
+    this.worker.postMessage({
+        objectKeys: kObjectKeys,
+        port: mP.port1
+    }, [mP.port1]);
+    this.workerRequestToCallback = new Map();
+
+    mP.port2.onmessage = e => {
+        const data = /** @type {{
+            id: number,
+            mod: WebAssembly.Module
+        }} */ (e.data);
+        this.workerRequestToCallback.get(data.id)(data.mod);
+    }
+    this.mp = mP;
 };
 
 CPU.prototype.wasm_patch = function()
@@ -1741,7 +1796,20 @@ CPU.prototype.load_bios = function()
             this.mem8[addr] = value;
         }.bind(this));
 };
-
+CPU.prototype.make_worker_request = function (reqId, code, callback) {
+    this.workerRequestToCallback.set(reqId, callback);
+    const wasmCode = code.slice();
+    this.mp.port2.postMessage({
+        id: reqId,
+        buffer: wasmCode.buffer
+    }, [wasmCode.buffer]); // CRITICAL PERFORMANCE INVARIANT: don't copy the whole buffer under any circumstances.
+}
+CPU.prototype.optimize_faster = function (code_buffer, imports, callback) {
+    const rid = this.requestId++;
+    this.makeWorkerRequest(rid, code_buffer, (mod) => {
+        callback(new WebAssembly.Instance(mod, imports));
+    })
+}
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
 {
     ptr >>>= 0;
@@ -1791,7 +1859,18 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
     }
 
     const SYNC_COMPILATION = false;
-
+    const WORKER_COMPILATION = true;
+    if (WORKER_COMPILATION) {
+        this.optimize_faster(code, this.jit_imports, (mod)=>{
+            const f = result.exports["f"];
+            this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
+            this.codegen_finalize_finished(wasm_table_index, start, state_flags);
+            if (this.test_hook_did_finalize_wasm) {
+                this.test_hook_did_finalize_wasm(code);
+            }
+        })
+        return;
+    }
     if(SYNC_COMPILATION)
     {
         const module = new WebAssembly.Module(code);

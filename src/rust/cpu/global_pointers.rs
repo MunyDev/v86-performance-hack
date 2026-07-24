@@ -71,8 +71,8 @@ pub const fpu_dp_selector: *mut i32 = 1060 as *mut i32;
 pub const tss_size_32: *mut bool = 1128 as *mut bool;
 
 pub const sse_scratch_register: *mut reg128 = 1136 as *mut reg128;
-
-pub const fpu_st: *mut F80 = 1152 as *mut F80;
+pub const jit_runs_not_allowed: *mut u8 = 1152 as *mut u8;
+pub const fpu_st: *mut F80 = 1153 as *mut F80;
 
 pub fn get_reg32_offset(r: u32) -> u32 {
     dbg_assert!(r < 8);
