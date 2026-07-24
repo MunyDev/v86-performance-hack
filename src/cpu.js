@@ -342,61 +342,60 @@ CPU.prototype.create_jit_imports = function()
     }
 
     this.jit_imports = jit_imports;
-    const kObjectKeys = Object.keys(this.jit_imports);
-    function WorkerSrcCode() {
+    const all_import_keys = Object.keys(this.jit_imports);
+    function worker_src_code() {
         self.onmessage = e => {
             const q = /** @type {{
                 port: MessagePort,
                 objectKeys: !Array<string>
             }} */ (e.data);
-            const wasmMemory = new WebAssembly.Memory({ initial: 64 }); // requirement
-            new Uint8Array(wasmMemory.buffer)[1152] = 1;
-            const craftedWasmImp = Object.create(null);
-            for (let key of q.objectKeys) {
-                craftedWasmImp[key] = () => { };
-            };
-            craftedWasmImp['m'] = wasmMemory;
+            const wasm_memory = new WebAssembly.Memory({ initial: 64 }); // requirement
+            new Uint8Array(wasm_memory.buffer)[1152] = 1;
+            const crafted_wasm_imports = Object.create(null);
+            for(let key of q.objectKeys) {
+                crafted_wasm_imports[key] = () => { };
+            }
+            crafted_wasm_imports["m"] = wasm_memory;
             q.port.onmessage = e => {
                 const buf = /** @type {{
                     id: number,
                     buffer: ArrayBuffer
                 }} */ (e.data);
-                WebAssembly.instantiate(new Uint8Array(buf.buffer), { e: craftedWasmImp })
+                WebAssembly.instantiate(new Uint8Array(buf.buffer), { e: crafted_wasm_imports })
                     .then(v => {
-                        for (let i = 0; i < 1; i++) {
-                            v.instance.exports.f();
-                        }
+                            v.instance.exports.f(-1);
 
                         q.port.postMessage({
                             id: buf.id,
                             mod: v.module
                         });
-                    })
-            }
-        }
+                    }
+                );
+            };
+        };
     }
-    function putInBlob(func, ...args) {
+    function put_in_blob(func, ...args) {
         const blob = new Blob([`(${func.toString()}).apply(null, ${JSON.stringify([...args])})`]);
         const ur = URL.createObjectURL(blob);
         return ur;
     }
-    this.worker = new Worker(putInBlob(WorkerSrcCode));
+    this.worker = new Worker(put_in_blob(worker_src_code));
     this.requestId = 0;
-    const mP = new MessageChannel();
+    const mp = new MessageChannel();
     this.worker.postMessage({
-        objectKeys: kObjectKeys,
-        port: mP.port1
-    }, [mP.port1]);
+        objectKeys: all_import_keys,
+        port: mp.port1
+    }, [mp.port1]);
     this.workerRequestToCallback = new Map();
 
-    mP.port2.onmessage = e => {
+    mp.port2.onmessage = e => {
         const data = /** @type {{
             id: number,
             mod: WebAssembly.Module
         }} */ (e.data);
         this.workerRequestToCallback.get(data.id)(data.mod);
-    }
-    this.mp = mP;
+    };
+    this.mp = mp;
 };
 
 CPU.prototype.wasm_patch = function()
@@ -1798,18 +1797,18 @@ CPU.prototype.load_bios = function()
 };
 CPU.prototype.make_worker_request = function (reqId, code, callback) {
     this.workerRequestToCallback.set(reqId, callback);
-    const wasmCode = code.slice();
+    const wasm_code = code.slice();
     this.mp.port2.postMessage({
         id: reqId,
-        buffer: wasmCode.buffer
-    }, [wasmCode.buffer]); // CRITICAL PERFORMANCE INVARIANT: don't copy the whole buffer under any circumstances.
-}
+        buffer: wasm_code.buffer
+    }, [wasm_code.buffer]); // CRITICAL PERFORMANCE INVARIANT: don't copy the whole buffer under any circumstances.
+};
 CPU.prototype.optimize_faster = function (code_buffer, imports, callback) {
     const rid = this.requestId++;
-    this.makeWorkerRequest(rid, code_buffer, (mod) => {
+    this.make_worker_request(rid, code_buffer, (mod) => {
         callback(new WebAssembly.Instance(mod, imports));
-    })
-}
+    });
+};
 CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, ptr, len)
 {
     ptr >>>= 0;
@@ -1860,15 +1859,17 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
 
     const SYNC_COMPILATION = false;
     const WORKER_COMPILATION = true;
-    if (WORKER_COMPILATION) {
-        this.optimize_faster(code, this.jit_imports, (mod)=>{
-            const f = result.exports["f"];
+    if(WORKER_COMPILATION) {
+        this.optimize_faster(code, {
+            e: this.jit_imports
+        }, (mod)=>{
+            const f = mod.exports["f"];
             this.wm.wasm_table.set(wasm_table_index + WASM_TABLE_OFFSET, f);
             this.codegen_finalize_finished(wasm_table_index, start, state_flags);
-            if (this.test_hook_did_finalize_wasm) {
+            if(this.test_hook_did_finalize_wasm) {
                 this.test_hook_did_finalize_wasm(code);
             }
-        })
+        });
         return;
     }
     if(SYNC_COMPILATION)

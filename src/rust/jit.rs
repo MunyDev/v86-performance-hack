@@ -11,7 +11,7 @@ use crate::codegen;
 use crate::control_flow;
 use crate::control_flow::WasmStructure;
 use crate::cpu::cpu;
-use crate::cpu::global_pointers::{self, jit_runs_not_allowed};
+use crate::cpu::global_pointers::{self};
 use crate::cpu::memory;
 use crate::cpu_context::CpuContext;
 use crate::jit_instructions;
@@ -1219,9 +1219,8 @@ fn jit_generate_module(
     builder.reset();
     
     let jit_early_return = builder.block_void();
-    builder.const_i32(global_pointers::jit_runs_not_allowed as i32);
-    builder.load_u8(0);
-    builder.const_i32(1);
+    builder.get_local(&builder.arg_local_initial_state.unsafe_clone());
+    builder.const_i32(-1);
     builder.ne_i32();
     builder.br_if(jit_early_return); // Early return if required.
     builder.return_(); // Return from the program if the early return isn't triggered.

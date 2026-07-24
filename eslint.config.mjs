@@ -2,6 +2,8 @@ export default [
     {
         "languageOptions": {
             "globals": {
+                "self": "writable",
+                "MessageChannel": "readonly",
                 "process": "readonly",
                 "window": "writable",
                 "navigator": "writable",
