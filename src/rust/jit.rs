@@ -1217,7 +1217,7 @@ fn jit_generate_module(
     state_flags: CachedStateFlags,
 ) -> Vec<(u32, u16)> {
     builder.reset();
-    
+
     let jit_early_return = builder.block_void();
     builder.get_local(&builder.arg_local_initial_state.unsafe_clone());
     builder.const_i32(-1);
