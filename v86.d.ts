@@ -605,6 +605,7 @@ export interface V86Options {
      * @default false
      */
     uart3?: boolean;
+    enable_perf_move_wasm?: boolean; // Configure whether to enable moving wasm module liftoff compilation to Worker thread.
 }
 
 export class V86 {

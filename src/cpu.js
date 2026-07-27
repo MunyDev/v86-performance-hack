@@ -381,21 +381,21 @@ CPU.prototype.create_jit_imports = function()
     }
     this.worker = new Worker(put_in_blob(worker_src_code));
     this.requestId = 0;
-    const mp = new MessageChannel();
+    const worker_message_port = new MessageChannel();
     this.worker.postMessage({
         objectKeys: all_import_keys,
-        port: mp.port1
-    }, [mp.port1]);
+        port: worker_message_port.port1
+    }, [worker_message_port.port1]);
     this.workerRequestToCallback = new Map();
 
-    mp.port2.onmessage = e => {
+    worker_message_port.port2.onmessage = e => {
         const data = /** @type {{
             id: number,
             mod: WebAssembly.Module
         }} */ (e.data);
         this.workerRequestToCallback.get(data.id)(data.mod);
     };
-    this.mp = mp;
+    this.mp = worker_message_port;
 };
 
 CPU.prototype.wasm_patch = function()
@@ -408,7 +408,7 @@ CPU.prototype.wasm_patch = function()
         console.assert(f, "Missing import: " + name);
         return f;
     };
-
+    this.update_perf_move_wasm_feature = get_import("update_perf_move_wasm_feature");
     this.reset_cpu = get_import("reset_cpu");
 
     this.getiopl = get_import("getiopl");
@@ -1050,7 +1050,15 @@ CPU.prototype.init = function(settings, device_bus)
     {
         this.set_jit_config(0, 1);
     }
-
+    if (typeof settings.enable_perf_move_wasm !== "undefined" && !settings.enable_perf_move_wasm) {
+        // Set feature to disabled.
+        this.enable_perf_move_wasm = false;
+        this.update_perf_move_wasm_feature(this.enable_perf_move_wasm);
+    }
+    else {
+        this.enable_perf_move_wasm = true;
+        this.update_perf_move_wasm_feature(this.enable_perf_move_wasm); // enabled-by-default
+    }
     settings.cpuid_level && this.set_cpuid_level(settings.cpuid_level);
 
     this.acpi_enabled[0] = +settings.acpi;
@@ -1803,7 +1811,7 @@ CPU.prototype.make_worker_request = function (reqId, code, callback) {
         buffer: wasm_code.buffer
     }, [wasm_code.buffer]); // CRITICAL PERFORMANCE INVARIANT: don't copy the whole buffer under any circumstances.
 };
-CPU.prototype.optimize_faster = function (code_buffer, imports, callback) {
+CPU.prototype.optimize_with_liftoff_worker = function (code_buffer, imports, callback) {
     const rid = this.requestId++;
     this.make_worker_request(rid, code_buffer, (mod) => {
         callback(new WebAssembly.Instance(mod, imports));
@@ -1858,9 +1866,9 @@ CPU.prototype.codegen_finalize = function(wasm_table_index, start, state_flags, 
     }
 
     const SYNC_COMPILATION = false;
-    const WORKER_COMPILATION = true;
-    if(WORKER_COMPILATION) {
-        this.optimize_faster(code, {
+
+    if(this.enable_perf_move_wasm) {
+        this.optimize_with_liftoff_worker(code, {
             e: this.jit_imports
         }, (mod)=>{
             const f = mod.exports["f"];

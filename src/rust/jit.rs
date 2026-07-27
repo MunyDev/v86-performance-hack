@@ -1207,6 +1207,13 @@ pub fn set_tlb_code(
         c.state_table[addr as usize] = state;
     }
 }
+static mut ENABLE_PERF_MOVE_WASM: bool = false;
+
+#[no_mangle]
+pub unsafe extern "C" fn update_perf_move_wasm_feature(enabled: bool) -> () {
+    ENABLE_PERF_MOVE_WASM = enabled;
+    // TODO(MunyDev): Update JIT_THRESHOLD
+}
 
 fn jit_generate_module(
     structure: Vec<WasmStructure>,
@@ -1217,14 +1224,18 @@ fn jit_generate_module(
     state_flags: CachedStateFlags,
 ) -> Vec<(u32, u16)> {
     builder.reset();
-
-    let jit_early_return = builder.block_void();
-    builder.get_local(&builder.arg_local_initial_state.unsafe_clone());
-    builder.const_i32(-1);
-    builder.ne_i32();
-    builder.br_if(jit_early_return); // Early return if required.
-    builder.return_(); // Return from the program if the early return isn't triggered.
-    builder.block_end();
+    unsafe {
+        // Unsafe is used because we need to access a static mutable variable.
+        if ENABLE_PERF_MOVE_WASM {
+            let jit_early_return = builder.block_void();
+            builder.get_local(&builder.arg_local_initial_state.unsafe_clone());
+            builder.const_i32(-1);
+            builder.ne_i32();
+            builder.br_if(jit_early_return); // Early return if required.
+            builder.return_(); // Return from the program if the early return isn't triggered.
+            builder.block_end();
+        }
+    }
     let mut register_locals = (0..8)
         .map(|i| {
             builder.load_fixed_i32(global_pointers::get_reg32_offset(i));
