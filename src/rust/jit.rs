@@ -73,7 +73,7 @@ static mut JIT_USE_LOOP_SAFETY: bool = true;
 
 pub static mut MAX_EXTRA_BASIC_BLOCKS: u32 = 250;
 
-pub const JIT_THRESHOLD: u32 = 200 * 1000;
+pub static mut JIT_THRESHOLD: u32 = 200 * 1000;
 
 // less branches will generate if-else, more will generate brtable
 pub const BRTABLE_CUTOFF: usize = 10;
@@ -831,7 +831,7 @@ pub fn jit_force_generate_unsafe(virt_addr: i32) {
         cpu::translate_address_read(virt_addr).unwrap(),
         cpu::get_seg_cs() as u32,
         cpu::get_state_flags(),
-        JIT_THRESHOLD,
+        unsafe {JIT_THRESHOLD},
     );
     dbg_assert!(get_jit_state().compiling.is_some());
 }
@@ -2195,7 +2195,7 @@ pub fn jit_increase_hotness_and_maybe_compile(
     }
 
     *hotness += heat;
-    if *hotness >= JIT_THRESHOLD {
+    if *hotness >= unsafe {JIT_THRESHOLD} {
         if is_compiling {
             return;
         }
