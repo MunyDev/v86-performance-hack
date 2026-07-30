@@ -73,7 +73,7 @@ static mut JIT_USE_LOOP_SAFETY: bool = true;
 
 pub static mut MAX_EXTRA_BASIC_BLOCKS: u32 = 250;
 
-pub const JIT_THRESHOLD: u32 = 200 * 1000;
+pub const JIT_THRESHOLD: u32 = 600 * 1000;
 
 // less branches will generate if-else, more will generate brtable
 pub const BRTABLE_CUTOFF: usize = 10;
@@ -113,12 +113,17 @@ pub fn rust_init() {
         console_log!("{}", panic_info.to_string());
     }));
 }
-
+#[derive(Clone)]
+struct CodeRange {
+    start: u32,
+    end: u32
+}
 struct PageInfo {
     wasm_table_index: WasmTableIndex,
     hidden_wasm_table_indices: Vec<WasmTableIndex>,
     entry_points: Vec<(u16, u16)>,
     state_flags: CachedStateFlags,
+    bb_ranges: Vec<CodeRange>
 }
 
 enum CompilingPageState {
@@ -377,6 +382,7 @@ pub fn jit_find_cache_entry(phys_address: u32, state_flags: CachedStateFlags) ->
             state_flags: s,
             entry_points,
             hidden_wasm_table_indices: _,
+            bb_ranges: _,
         }) => {
             if *s == state_flags {
                 let page_offset = phys_address as u16 & 0xFFF;
@@ -1032,6 +1038,7 @@ fn jit_analyze_and_generate(
             state_flags,
             entry_points: Vec::new(),
             hidden_wasm_table_indices: Vec::new(),
+            bb_ranges: Vec::new()
         });
         ctx.entry_points
             .entry(p)
@@ -1040,6 +1047,10 @@ fn jit_analyze_and_generate(
     for &(addr, state) in &entries {
         let code = page_info.get_mut(&Page::page_of(addr)).unwrap();
         code.entry_points.push((addr as u16 & 0xFFF, state));
+    }
+    for (addr, block) in &basic_block_by_addr {
+        let pi = page_info.get_mut(&Page::page_of(*addr)).unwrap();
+        pi.bb_ranges.push(CodeRange { start: block.addr, end: block.end_addr });
     }
 
     profiler::stat_increment_by(
@@ -1169,6 +1180,7 @@ pub fn update_tlb_code(virt_page: Page, phys_page: Page) {
             entry_points,
             state_flags,
             hidden_wasm_table_indices: _,
+            bb_ranges: _,
         }) => set_tlb_code(virt_page, *wasm_table_index, entry_points, *state_flags),
         None => cpu::clear_tlb_code(virt_page.to_u32() as i32),
     };
@@ -2249,6 +2261,7 @@ fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
         hidden_wasm_table_indices,
         state_flags: _,
         entry_points: _,
+        bb_ranges: _,
     }) = ctx.pages.remove(&page)
     {
         profiler::stat_increment(stat::INVALIDATE_PAGE_HAD_CODE);
