@@ -161,7 +161,10 @@ unsafe fn string_instruction(
         match instruction {
             Instruction::Movs => {
                 let (addr, skip) =
-                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(es + dst));
+                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(
+                        es + dst,
+                        size_bytes as u32,
+                    ));
                 movs_into_svga_lfb = memory::in_svga_lfb(addr);
                 rep_fast = rep_fast && (!memory::in_mapped_range(addr) || movs_into_svga_lfb);
                 phys_dst = addr;
@@ -169,7 +172,10 @@ unsafe fn string_instruction(
             },
             Instruction::Stos | Instruction::Ins => {
                 let (addr, skip) =
-                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(es + dst));
+                    return_on_pagefault!(translate_address_write_and_can_skip_dirty(
+                        es + dst,
+                        size_bytes as u32,
+                    ));
                 rep_fast = rep_fast && !memory::in_mapped_range(addr);
                 phys_dst = addr;
                 skip_dirty_page = skip;

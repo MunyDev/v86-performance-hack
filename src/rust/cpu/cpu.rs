@@ -25,7 +25,7 @@ use crate::state_flags::CachedStateFlags;
 
 use std::collections::HashSet;
 use std::ptr;
-
+pub  const ENABLE_WASM_ELIDE_JIT_INVALIDATION_ON_UNRELATED_WRITE: bool = true;
 mod wasm {
     extern "C" {
         pub fn call_indirect1(f: i32, x: u16);
@@ -320,6 +320,7 @@ pub struct Code {
     pub wasm_table_index: jit::WasmTableIndex,
     pub state_flags: CachedStateFlags,
     pub state_table: [u16; 0x1000],
+    pub bb_ranges: Vec<jit::CodeRange>,
 }
 
 pub static mut tlb_data: [i32; 0x100000] = [0; 0x100000];
@@ -1961,7 +1962,7 @@ pub unsafe fn translate_address_read_jit(address: i32) -> OrPageFault<u32> {
 pub unsafe fn translate_address_write(address: i32) -> OrPageFault<u32> {
     translate_address(address, true, *cpl == 3, false, true)
 }
-pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -> OrPageFault<u32> {
+pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16, write_size: u32) -> OrPageFault<u32> {
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
     if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {
@@ -1974,6 +1975,24 @@ pub unsafe fn translate_address_write_jit(address: i32, wasm_table_index: u16) -
         return Ok(phys_addr);
     }
     let is_smc = jit::jit_page_has_wasm_table_index(page, wasm_table_index);
+    if ENABLE_WASM_ELIDE_JIT_INVALIDATION_ON_UNRELATED_WRITE {
+    match tlb_code[(address as u32 >> 12) as usize] {
+        Some(code)=>{
+            let c = code.as_ref();
+            let write_end = phys_addr + write_size;
+            let mut invalidate_jit = false;
+            for range in &c.bb_ranges {
+                if phys_addr<range.end && write_end > range.start {
+                    invalidate_jit = true;
+                }
+            }
+            if !invalidate_jit {
+                return Ok(phys_addr);
+            }
+        }
+        _=>{}
+    };
+    }
     jit::jit_dirty_page(page);
     if !is_smc {
         return Ok(phys_addr);
@@ -2015,13 +2034,46 @@ pub unsafe fn translate_address(
     Ok((entry & !0xFFF ^ address) as u32 - memory::mem8 as u32)
 }
 
-pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32) -> OrPageFault<(u32, bool)> {
+pub unsafe fn translate_address_write_and_can_skip_dirty(address: i32, qs: u32) -> OrPageFault<(u32, bool)> {
     let mut entry = tlb_data[(address as u32 >> 12) as usize];
     let user = *cpl == 3;
     if entry & (TLB_VALID | if user { TLB_NO_USER } else { 0 } | TLB_READONLY) != TLB_VALID {
         entry = do_page_walk(address, true, user, false, true)?.get();
     }
-    Ok((
+    if ENABLE_WASM_ELIDE_JIT_INVALIDATION_ON_UNRELATED_WRITE {
+    if entry & TLB_HAS_CODE != 0 { //  only do the bb boundary check if we are actually writing over page with wasm code
+        match tlb_code[(address as u32 >> 12) as usize] {
+            Some(c)=>{
+                let code_obj = c.as_ref();
+                let range_end = qs  + address as u32;
+                let mut inv_jit = false;
+                
+    let phys_addr =
+        (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32;
+                for r in &code_obj.bb_ranges {
+                    if (phys_addr as u32) < r.start && (phys_addr > r.end) {
+                        // invalidate JIT
+                        inv_jit = true;
+                        break;
+                    }
+
+                }
+                if !inv_jit {
+                    return Ok((
+                                (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32,
+                                true
+                    ));
+                }
+                }
+                 _=>{
+                // this isn't an unreachable case, becuase it can be REACHED() when the page is makred with TLB code, but it isn't actually populated with wasm code yet. 
+                } // fallthrough to default case
+            }
+           
+        }
+    
+    }
+    return Ok((
         (entry & !0xFFF ^ address) as u32 - memory::mem8 as u32,
         entry & TLB_HAS_CODE == 0,
     ))
@@ -3561,7 +3613,7 @@ pub unsafe fn safe_read_slow_jit(
 
     let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
     let addr_low = match if is_write {
-        translate_address_write_jit(addr, wasm_table_index)
+        translate_address_write_jit(addr, wasm_table_index, bitsize as u32)
     }
     else {
         translate_address_read_jit(addr)
@@ -3575,7 +3627,7 @@ pub unsafe fn safe_read_slow_jit(
     if crosses_page {
         let boundary_addr = (addr | 0xFFF) + 1;
         let addr_high = match if is_write {
-            translate_address_write_jit(boundary_addr, wasm_table_index)
+            translate_address_write_jit(boundary_addr, wasm_table_index, bitsize as u32)
         }
         else {
             translate_address_read_jit(boundary_addr)
@@ -3713,7 +3765,7 @@ pub unsafe fn safe_write_slow_jit(
     dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
 
     let crosses_page = (addr & 0xFFF) + bitsize / 8 > 0x1000;
-    let addr_low = match translate_address_write_jit(addr, wasm_table_index) {
+    let addr_low = match translate_address_write_jit(addr, wasm_table_index, bitsize as u32) {
         Err(()) => {
             *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
             return 1;
@@ -3721,7 +3773,7 @@ pub unsafe fn safe_write_slow_jit(
         Ok(x) => x,
     };
     if crosses_page {
-        let addr_high = match translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index) {
+        let addr_high = match translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index, bitsize as u32) {
             Err(()) => {
                 *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
                 return 1;
@@ -3818,9 +3870,9 @@ pub unsafe fn writable_or_pagefault_jit(
     dbg_assert!(eip_offset_in_page >= 0 && eip_offset_in_page < 0x1000);
     dbg_assert!(u32::from(wasm_table_index) < jit::WASM_TABLE_SIZE);
     let crosses_page = (addr & 0xFFF) + size > 0x1000;
-    if translate_address_write_jit(addr, wasm_table_index).is_err()
+    if translate_address_write_jit(addr, wasm_table_index, size as u32).is_err()
         || crosses_page
-            && translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index).is_err()
+            && translate_address_write_jit((addr | 0xFFF) + 1, wasm_table_index, size as u32).is_err()
     {
         *instruction_pointer = *instruction_pointer & !0xFFF | eip_offset_in_page;
         return 1;
@@ -3829,7 +3881,7 @@ pub unsafe fn writable_or_pagefault_jit(
 }
 
 pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
-    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
+    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr, 1)?;
     if memory::in_mapped_range(phys_addr) {
         memory::mmap_write8(phys_addr, value);
     }
@@ -3846,7 +3898,7 @@ pub unsafe fn safe_write8(addr: i32, value: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
-    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
+    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr, 2)?;
     dbg_assert!(value >= 0 && value < 0x10000);
     if addr & 0xFFF == 0xFFF {
         virt_boundary_write16(phys_addr, translate_address_write(addr + 1)?, value);
@@ -3867,7 +3919,7 @@ pub unsafe fn safe_write16(addr: i32, value: i32) -> OrPageFault<()> {
 }
 
 pub unsafe fn safe_write32(addr: i32, value: i32) -> OrPageFault<()> {
-    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
+    let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr, 4)?;
     if addr & 0xFFF > 0x1000 - 4 {
         virt_boundary_write32(
             phys_addr,
@@ -3897,7 +3949,8 @@ pub unsafe fn safe_write64(addr: i32, value: u64) -> OrPageFault<()> {
         safe_write32(addr + 4, (value >> 32) as i32).unwrap();
     }
     else {
-        let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
+        let (phys_addr, can_skip_dirty_page) =
+            translate_address_write_and_can_skip_dirty(addr, 8)?;
         if memory::in_mapped_range(phys_addr) {
             memory::mmap_write64(phys_addr, value);
         }
@@ -3921,7 +3974,8 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
         safe_write64(addr + 8, value.u64[1]).unwrap();
     }
     else {
-        let (phys_addr, can_skip_dirty_page) = translate_address_write_and_can_skip_dirty(addr)?;
+        let (phys_addr, can_skip_dirty_page) =
+            translate_address_write_and_can_skip_dirty(addr, 16)?;
         if memory::in_mapped_range(phys_addr) {
             memory::mmap_write128(phys_addr, value.u64[0], value.u64[1]);
         }
@@ -3941,7 +3995,7 @@ pub unsafe fn safe_write128(addr: i32, value: reg128) -> OrPageFault<()> {
 #[inline(always)]
 pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     let (phys_addr, can_skip_dirty_page) =
-        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
+        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr, 1));
     let x = memory::read8(phys_addr);
     let value = instruction(x);
     dbg_assert!(value >= 0 && value < 0x100);
@@ -3962,7 +4016,7 @@ pub unsafe fn safe_read_write8(addr: i32, instruction: &dyn Fn(i32) -> i32) {
 #[inline(always)]
 pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     let (phys_addr, can_skip_dirty_page) =
-        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
+        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr, 2));
     if phys_addr & 0xFFF == 0xFFF {
         let phys_addr_high = return_on_pagefault!(translate_address_write(addr + 1));
         let x = virt_boundary_read16(phys_addr, phys_addr_high);
@@ -3990,7 +4044,7 @@ pub unsafe fn safe_read_write16(addr: i32, instruction: &dyn Fn(i32) -> i32) {
 #[inline(always)]
 pub unsafe fn safe_read_write32(addr: i32, instruction: &dyn Fn(i32) -> i32) {
     let (phys_addr, can_skip_dirty_page) =
-        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr));
+        return_on_pagefault!(translate_address_write_and_can_skip_dirty(addr, 4));
     if phys_addr & 0xFFF >= 0xFFD {
         let phys_addr_high = return_on_pagefault!(translate_address_write(addr + 3 & !3));
         let phys_addr_high = phys_addr_high | (addr as u32) + 3 & 3;

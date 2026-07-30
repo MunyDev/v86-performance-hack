@@ -67,16 +67,16 @@ static mut JIT_DISABLED: bool = false;
 // - v8 poorly handles large br_table elements and OOMs on modules much smaller than the above limit
 //   See https://bugs.chromium.org/p/v8/issues/detail?id=9697 and https://bugs.chromium.org/p/v8/issues/detail?id=9141
 //   Will hopefully be fixed in the near future by generating direct control flow
-static mut MAX_PAGES: u32 = 3;
+static mut MAX_PAGES: u32 = 1;
 
 static mut JIT_USE_LOOP_SAFETY: bool = true;
 
 pub static mut MAX_EXTRA_BASIC_BLOCKS: u32 = 250;
 
-pub const JIT_THRESHOLD: u32 = 600 * 1000;
+pub const JIT_THRESHOLD: u32 = 100 * 1000;
 
 // less branches will generate if-else, more will generate brtable
-pub const BRTABLE_CUTOFF: usize = 10;
+pub const BRTABLE_CUTOFF: usize = 1;
 
 // needs to be synced to const.js
 pub const WASM_TABLE_SIZE: u32 = 900;
@@ -113,10 +113,11 @@ pub fn rust_init() {
         console_log!("{}", panic_info.to_string());
     }));
 }
+
 #[derive(Clone)]
-struct CodeRange {
-    start: u32,
-    end: u32
+pub struct CodeRange {
+    pub start: u32,
+    pub end: u32
 }
 struct PageInfo {
     wasm_table_index: WasmTableIndex,
@@ -1129,6 +1130,7 @@ pub fn codegen_finalize_finished(
                     wasm_table_index,
                     &info.entry_points,
                     state_flags,
+                    &info.bb_ranges
                 );
             }
         }
@@ -1180,8 +1182,8 @@ pub fn update_tlb_code(virt_page: Page, phys_page: Page) {
             entry_points,
             state_flags,
             hidden_wasm_table_indices: _,
-            bb_ranges: _,
-        }) => set_tlb_code(virt_page, *wasm_table_index, entry_points, *state_flags),
+            bb_ranges,
+        }) => set_tlb_code(virt_page, *wasm_table_index, entry_points, *state_flags, bb_ranges),
         None => cpu::clear_tlb_code(virt_page.to_u32() as i32),
     };
 }
@@ -1191,6 +1193,7 @@ pub fn set_tlb_code(
     wasm_table_index: WasmTableIndex,
     entries: &Vec<(u16, u16)>,
     state_flags: CachedStateFlags,
+    bb_boundaries: &Vec<CodeRange>
 ) {
     let c = match unsafe { cpu::tlb_code[virt_page.to_u32() as usize] } {
         None => {
@@ -1200,6 +1203,7 @@ pub fn set_tlb_code(
                     wasm_table_index,
                     state_flags,
                     state_table,
+                    bb_ranges: bb_boundaries.clone() 
                 })));
                 cpu::tlb_code[virt_page.to_u32() as usize] = Some(c);
                 c.as_mut()
@@ -2255,7 +2259,7 @@ fn free_wasm_table_index(ctx: &mut JitState, wasm_table_index: WasmTableIndex) {
 /// Register a write in this page: Delete all present code
 fn jit_dirty_page_ctx(ctx: &mut JitState, page: Page) {
     let mut did_have_code = false;
-
+    // `page` is a **physical** page.
     if let Some(PageInfo {
         wasm_table_index,
         hidden_wasm_table_indices,
